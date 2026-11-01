@@ -2,6 +2,7 @@ import pickle
 import json
 from pathlib import Path
 from findex.index import InvertedIndex
+from contextlib import contextmanager
 
 
 def save_index_pickle(index: InvertedIndex, path: Path) -> None:
@@ -44,3 +45,13 @@ def load_index_json(path: Path) -> InvertedIndex:
         idx.index[term] = [Posting(doc_id=p["doc_id"], tf=p["tf"]) for p in postings]
 
     return idx
+
+@contextmanager
+def open_index(path: Path):
+    """Контекстний менеджер для безпечного завантаження та закриття індексу."""
+    file_obj = open(path, "rb")
+    try:
+        index_data = pickle.load(file_obj)
+        yield index_data
+    finally:
+        file_obj.close()
