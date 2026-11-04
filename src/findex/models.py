@@ -15,6 +15,7 @@ class Posting:
 class DocMeta:
     doc_id: int
     path: Path
+    length: int = 0
 
 
 class Index(Mapping[str, List[Posting]]):

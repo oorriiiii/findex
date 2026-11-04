@@ -1,63 +1,138 @@
-import argparse
-import gc
+import asyncio
+import os
 import time
-import tracemalloc
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable
+import typer
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
 
-from findex.stats import CorpusStats, compute_stats_eager, compute_stats_lazy
+from findex.index import build_partial, merge
+from findex.crawler import crawl
 
-
-def benchmark(func: Callable[[Path], CorpusStats], corpus_dir: Path) -> tuple[CorpusStats, float, float]:
-    gc.collect()
-    tracemalloc.start()
-    start_time = time.perf_counter()
-
-    stats = func(corpus_dir)
-
-    elapsed = time.perf_counter() - start_time
-    _, peak_bytes = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
-    peak_mb = peak_bytes / (1024 * 1024)
-    return stats, elapsed, peak_mb
+app = typer.Typer()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Lab 01: Corpus Statistics & Memory Benchmark")
-    parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Шлях до директорії корпусу")
-    args = parser.parse_args()
+@app.command()
+def index(
+        data_dir: Path = typer.Argument(..., help="Шлях до корпусу документів"),
+        out: Path = typer.Option("index.bin", "--out", help="Файл для збереження індексу"),
+        workers: int = typer.Option(os.cpu_count(), "--workers", help="Кількість воркерів"),
+        executor: str = typer.Option("processes", "--executor", help="Тип екзекутора: serial, threads, processes"),
+):
+    """Побудова індексу з підтримкою паралелізму."""
+    files = sorted(list(data_dir.glob("**/*.txt")))
+    if not files:
+        typer.echo(f"Файлів не знайдено в {data_dir}", err=True)
+        raise typer.Exit(code=1)
 
-    print(f"Аналіз корпусу в директорії: {args.data_dir.resolve()}\n")
+    typer.echo(f"Знайдено файлів: {len(files)}. Запуск з екзекутором: {executor} (воркерів: {workers})")
 
-    print("1. Запуск ЛІНИВОГО (Generator / Lazy) конвеєра...")
-    lazy_stats, lazy_time, lazy_peak = benchmark(compute_stats_lazy, args.data_dir)
+    chunk_size = max(1, len(files) // workers)
+    chunks = []
+    current_id = 1
 
-    print("2. Запуск ЖАДІБНОГО (List / Eager) конвеєра...")
-    eager_stats, eager_time, eager_peak = benchmark(compute_stats_eager, args.data_dir)
+    for i in range(0, len(files), chunk_size):
+        chunk_files = files[i:i + chunk_size]
+        if chunk_files:
+            chunks.append((chunk_files, current_id))
+            current_id += len(chunk_files)
 
-    print("\n" + "=" * 60)
-    print("СТАТИСТИКА КОРПУСУ")
-    print("=" * 60)
-    print(f"Кількість документів : {lazy_stats.doc_count:,}")
-    print(f"Загальна к-сть токенів: {lazy_stats.token_count:,}")
-    print(f"Розмір словника       : {lazy_stats.vocab_size:,} унікальних термів")
+    start_time = time.time()
+    partial_indices = []
 
-    print("\n" + "=" * 60)
-    print("ТАБЛИЦЯ ДЛЯ README.md (Lazy vs Eager)")
-    print("=" * 60)
-    print("| Метрика | Лінивий конвеєр (Generators) | Жадібний підхід (Lists) | Різниця |")
-    print("|---|---|---|---|")
-    print(f"| Кількість документів | {lazy_stats.doc_count:,} | {eager_stats.doc_count:,} | однаково |")
-    print(f"| Загальна к-сть токенів | {lazy_stats.token_count:,} | {eager_stats.token_count:,} | однаково |")
-    print(f"| Розмір словника | {lazy_stats.vocab_size:,} | {eager_stats.vocab_size:,} | однаково |")
-    print(f"| Час виконання (с) | {lazy_time:.2f} s | {eager_time:.2f} s | {eager_time / max(lazy_time, 1e-6):.2f}x |")
-    print(f"| Пікова пам'ять (МБ) | **{lazy_peak:.2f} MB** | **{eager_peak:.2f} MB** | **{eager_peak / max(lazy_peak, 1e-6):.1f}x більше** |")
+    if executor == "serial":
+        for chunk_files, start_id in chunks:
+            partial_indices.append(build_partial(chunk_files, start_id))
 
-    print("\nТоп-50 найчастотніших термів:")
-    for rank, (term, count) in enumerate(lazy_stats.top_terms, start=1):
-        print(f"{rank:2d}. {term:<18} — {count:,}")
+    elif executor == "threads":
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(build_partial, cf, sid) for cf, sid in chunks]
+            for future in as_completed(futures):
+                partial_indices.append(future.result())
+
+    elif executor == "processes":
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(build_partial, cf, sid) for cf, sid in chunks]
+            for future in as_completed(futures):
+                partial_indices.append(future.result())
+    else:
+        typer.echo(f"Невідомий екзекутор: {executor}", err=True)
+        raise typer.Exit(code=1)
+
+    merge_start = time.time()
+    final_index = merge(partial_indices)
+    merge_time = time.time() - merge_start
+
+    # Збереження індексу через storage (за потреби розкоментуй)
+    # from findex.storage import save_index
+    # save_index(final_index, out)
+
+    total_time = time.time() - start_time
+    typer.echo(f"Індекс побудовано за {total_time:.4f} с (Час злиття: {merge_time:.4f} с)")
 
 
-if __name__ == "__main__":
-    main()
+@app.command()
+def crawl_cmd(
+        start_url: str = typer.Argument(..., help="Початковий URL для краулінгу"),
+        max_pages: int = typer.Option(200, "--max-pages", help="Максимальна кількість сторінок"),
+        concurrency: int = typer.Option(10, "--concurrency", help="Кількість одночасних воркерів"),
+        output: Path = typer.Option("corpus.jsonl", "--output", help="Файл для JSONL стріму"),
+        log_file: Path = typer.Option("crawl.log", "--log", help="Файл логів краулера"),
+        user_agent: str = typer.Option("FindexBot/1.0 (+https://github.com/oorriiiii/findex)", "--user-agent"),
+):
+    """Асинхронний краулер вебсторінок з інтерфейсом rich."""
+
+    async def run():
+        start_time = time.time()
+        collected = 0
+        errors = 0
+
+        def generate_table():
+            table = Table(show_header=True, header_style="bold magenta")
+            table.add_column("Метрика", style="cyan")
+            table.add_column("Значення", style="green")
+
+            elapsed = time.time() - start_time
+            speed = collected / elapsed if elapsed > 0 else 0.0
+
+            table.add_row("Зібрано сторінок", str(collected))
+            table.add_row("Швидкість", f"{speed:.2f} стор/сек")
+            table.add_row("Помилки", str(errors))
+            table.add_row("Час роботи", f"{elapsed:.1f} сек")
+            return Panel(table, title="[bold blue]Findex Async Crawler[/bold blue]", border_style="cyan")
+
+        # Викликаємо crawl() коректно, щоб отримати асинхронний генератор
+        crawler_gen = crawl(
+            start_url=start_url,
+            max_pages=max_pages,
+            concurrency=concurrency,
+            user_agent=user_agent,
+            output_jsonl=output,
+            log_file=log_file
+        )
+
+        with Live(generate_table(), refresh_per_second=4) as live:
+            async for page in crawler_gen:
+                collected += 1
+                if page["status"] != 200:
+                    errors += 1
+                live.update(generate_table())
+
+    # Безпечний запуск циклу подій
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # Якщо петля вже є (наприклад, у деяких середовищах)
+        asyncio.run_coroutine_threadsafe(run(), loop)
+    else:
+        asyncio.run(run())
+
+    typer.echo(f"Краулінг завершено! Дані збережено у {output}")
+
+    if __name__ == "__main__":
+        app()
