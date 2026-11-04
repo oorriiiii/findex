@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <title>Findex Search Engine</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #333; background: #f9f9f9; }
+        h1 { color: #2c3e50; }
+        .search-box { display: flex; gap: 10px; margin-bottom: 30px; }
+        input[type="text"] { flex: 1; padding: 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; }
+        select, button { padding: 10px 15px; font-size: 16px; cursor: pointer; background: #3498db; color: white; border: none; border-radius: 4px; }
+        button:hover { background: #2980b9; }
+        .result-item { background: white; padding: 15px; margin-bottom: 15px; border-radius: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .score { float: right; font-size: 14px; color: #7f8c8d; }
+        .meta { font-size: 12px; color: #95a5a6; margin-top: 5px; }
+    </style>
+</head>
+<body>
+    <h1>Findex Search Engine</h1>
+    <form class="search-box" method="GET" action="/">
+        <input type="text" name="q" placeholder="Введіть пошуковий запит..." value="{{ query|default('') }}">
+        <select name="scorer">
+            <option value="bm25" {% if scorer == 'bm25' %}selected{% endif %}>BM25</option>
+            <option value="tfidf" {% if scorer == 'tfidf' %}selected{% endif %}>TF-IDF</option>
+        </select>
+        <button type="submit">Шукати</button>
+    </form>
+
+    {% if results is not none %}
+        <p>Знайдено результатів: <b>{{ total }}</b></p>
+        {% for item in results %}
+            <div class="result-item">
+                <span class="score">Score: {{ "%.4f"|format(item.score) }}</span>
+                <h3><a href="/docs/{{ item.doc_id }}">{{ item.title }}</a></h3>
+                <p>{{ item.snippet }}</p>
+                <div class="meta">Doc ID: {{ item.doc_id }}</div>
+            </div>
+        {% endfor %}
+    {% endif %}
+</body>
+</html>

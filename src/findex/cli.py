@@ -4,6 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from pathlib import Path
 import typer
+import uvicorn
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
@@ -65,10 +66,6 @@ def index(
     final_index = merge(partial_indices)
     merge_time = time.time() - merge_start
 
-    # Збереження індексу через storage (за потреби розкоментуй)
-    # from findex.storage import save_index
-    # save_index(final_index, out)
-
     total_time = time.time() - start_time
     typer.echo(f"Індекс побудовано за {total_time:.4f} с (Час злиття: {merge_time:.4f} с)")
 
@@ -103,7 +100,6 @@ def crawl_cmd(
             table.add_row("Час роботи", f"{elapsed:.1f} сек")
             return Panel(table, title="[bold blue]Findex Async Crawler[/bold blue]", border_style="cyan")
 
-        # Викликаємо crawl() коректно, щоб отримати асинхронний генератор
         crawler_gen = crawl(
             start_url=start_url,
             max_pages=max_pages,
@@ -120,19 +116,33 @@ def crawl_cmd(
                     errors += 1
                 live.update(generate_table())
 
-    # Безпечний запуск циклу подій
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
 
     if loop and loop.is_running():
-        # Якщо петля вже є (наприклад, у деяких середовищах)
         asyncio.run_coroutine_threadsafe(run(), loop)
     else:
         asyncio.run(run())
 
     typer.echo(f"Краулінг завершено! Дані збережено у {output}")
 
-    if __name__ == "__main__":
-        app()
+
+@app.command("serve")
+def serve(
+        port: int = typer.Option(8000, "--port", help="Порт для запуску сервера"),
+        workers: int = typer.Option(1, "--workers", help="Кількість воркерів uvicorn"),
+        index_path: str = typer.Option("index.bin", "--index-path", help="Шлях до файлу індексу"),
+):
+    """Запуск вебсервера FastAPI через Uvicorn із налаштуванням із CLI або середовища."""
+    os.environ["INDEX_PATH"] = index_path
+    from findex.web.app import app_state
+    app_state["index_path"] = Path(index_path)
+
+    typer.echo(f"Запуск Findex Web Server на порту {port} з {workers} воркерами (шлях індексу: {index_path})...")
+    uvicorn.run("findex.web.app:app", host="0.0.0.0", port=port, workers=workers)
+
+
+if __name__ == "__main__":
+    app()
